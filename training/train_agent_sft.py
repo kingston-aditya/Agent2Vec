@@ -32,6 +32,7 @@ while not os.path.isdir(os.path.join(root, '.git')): root = os.path.dirname(root
 sys.path.insert(1, root)
 
 from dataloaders.test_dataloader import VideoCaptionDataset
+from dataloaders.cc3m_video_dataloader import CC3MPatchHFDataset
 
 class ForkedPdb(pdb_original.Pdb):
     """A Pdb subclass that may be used
@@ -217,15 +218,9 @@ def main(args):
     model.llava_model.requires_grad_(False)
 
     # load the dataset
-    root = "/nfshomes/asarkar6/trinity/small_video_dst/"
-    data_path = {
-        "root": root,
-        "video": os.path.join(root, "videos.txt"),
-        "captions": os.path.join(root, "captions.txt") 
-    }
-    dataset = VideoCaptionDataset(data_path=data_path)
+    data_path = "/bucket/YamadaU/asarkar/CC3M/"
+    dataset = CC3MPatchHFDataset(data_path=data_path)
     collate_fn = dataset.collate_fn
-    dataset = ConcatDataset([dataset] * int(10e3))
     
     dataloader = DataLoader(dataset, batch_size=4, shuffle=True, collate_fn=collate_fn)
     
