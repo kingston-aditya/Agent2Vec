@@ -2,6 +2,7 @@ import random
 import numpy as np
 from PIL import Image
 from datasets import load_dataset
+from torch.utils.data import Dataset, DataLoader, ConcatDataset
 import os
 
 import sys
@@ -10,6 +11,7 @@ while root != os.path.dirname(root) and not os.path.isdir(os.path.join(root, '.g
 sys.path.insert(1, root)
 
 from dataloaders.base_dataloader import VideoContrastiveDataset
+import pdb
 
 class CC3MPatchHFDataset(VideoContrastiveDataset):
     def __init__(self, data_path: str, target_size: tuple = (224, 224)):
@@ -106,3 +108,12 @@ class CC3MPatchHFDataset(VideoContrastiveDataset):
             "video_neg": video_neg,  # Shape: [10, 224, 224, 3] (shuffled sequence)
             "prompts": caption
         }
+
+if __name__ == "__main__":
+    DATA_DIR = ""
+    dataset = CC3MPatchHFDataset(data_path = os.path.join(DATA_DIR, ""))
+    dataloader = DataLoader(dataset, batch_size=4, shuffle=False, collate_fn=dataset.collate_fn, num_workers=4)
+    
+    for i, batch in enumerate(dataloader):
+        pdb.set_trace()
+        break

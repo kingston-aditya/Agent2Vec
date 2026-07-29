@@ -34,7 +34,6 @@ if __name__ == "__main__":
     
     dataset = VideoCaptionDataset(data_path=data_path)
     collate_fn = dataset.collate_fn
-
     dataset = ConcatDataset([dataset] * int(10e3))
 
     dataloader = DataLoader(

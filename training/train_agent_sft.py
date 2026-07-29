@@ -34,6 +34,10 @@ sys.path.insert(1, root)
 from dataloaders.test_dataloader import VideoCaptionDataset
 from dataloaders.cc3m_video_dataloader import CC3MPatchHFDataset
 
+import json
+import pandas as pd
+import matplotlib.pyplot as plt
+
 class ForkedPdb(pdb_original.Pdb):
     """A Pdb subclass that may be used
     from a forked multiprocessing child
@@ -108,29 +112,78 @@ class JointEmbeddingAlignmentNetwork(nn.Module):
         return fused_representations
 
     def compute_infonce_loss(self, cls_representations, temp=0.07):
+        # cls_representations shape: [2*B, D]
         total_samples = cls_representations.size(0)
         batch_size = total_samples // 2
 
-        queries = cls_representations  # [2*B, D]
-        targets = cls_representations[:batch_size]  # [B, D]
+        # Split into View 1 (positives) and View 2 (negatives/augmented views)
+        z1 = cls_representations[:batch_size]  # [B, D]
+        z2 = cls_representations[batch_size:]  # [B, D]
 
-        queries_norm = F.normalize(queries, p=2, dim=-1)
-        targets_norm = F.normalize(targets, p=2, dim=-1)
+        # Normalize embeddings along feature dimension
+        z1_norm = F.normalize(z1, p=2, dim=-1)
+        z2_norm = F.normalize(z2, p=2, dim=-1)
 
-        # Similarity matrix: [2*B, B]
-        similarity_matrix = torch.matmul(queries_norm, targets_norm.T) / temp
+        # Cross-similarity matrix: [B, B]
+        # Entry (i, j) is the similarity between z1[i] and z2[j]
+        similarity_matrix = torch.matmul(z1_norm, z2_norm.T) / temp
 
         device = cls_representations.device
         labels = torch.arange(batch_size, device=device)
 
-        # Row loss uses the positive pairs in the upper half [B, B]
-        loss_row = F.cross_entropy(similarity_matrix[:batch_size, :], labels)
+        # Symmetric InfoNCE Loss (CLIP-style)
+        # loss_z1_to_z2: Predict z2[i] given z1[i] across all z2 in batch
+        loss_z1_to_z2 = F.cross_entropy(similarity_matrix, labels)
         
-        # FIX: Slice the columns to align predictions cleanly [B, B]
-        loss_col = F.cross_entropy(similarity_matrix[:batch_size, :].T, labels)
+        # loss_z2_to_z1: Predict z1[i] given z2[i] across all z1 in batch
+        loss_z2_to_z1 = F.cross_entropy(similarity_matrix.T, labels)
         
-        total_loss = (loss_row + loss_col) / 2.0
+        total_loss = (loss_z1_to_z2 + loss_z2_to_z1) / 2.0
         return total_loss
+
+def plot_json_metric(json_path="training_logs.json", metric_name="loss", smooth_window=20):
+    """
+    Plots a metric from the JSON log file against iterations.
+    
+    Available metrics: 'loss', 'loss1', 'loss2', 'lr', 'grad_norm'
+    """
+    data = []
+    
+    # Read the JSON lines file
+    with open(json_path, mode="r", encoding="utf-8") as f:
+        for line in f:
+            if line.strip():
+                data.append(json.loads(line))
+
+    # Convert to pandas DataFrame
+    df = pd.DataFrame(data)
+
+    if metric_name not in df.columns:
+        raise ValueError(f"Metric '{metric_name}' not found in JSON. Available: {list(df.columns)}")
+
+    plt.figure(figsize=(10, 5))
+
+    # Plot raw values
+    plt.plot(df["step"], df[metric_name], alpha=0.3, color="royalblue", label="Raw Step Values")
+
+    # Plot moving average for cleaner trends
+    if smooth_window > 1 and len(df) > smooth_window:
+        smoothed = df[metric_name].rolling(window=smooth_window).mean()
+        plt.plot(df["step"], smoothed, color="navy", linewidth=2, label=f"Smoothed ({smooth_window} steps)")
+
+    plt.xlabel("Iterations (Global Step)", fontsize=12)
+    plt.ylabel(metric_name.upper(), fontsize=12)
+    plt.title(f"{metric_name.replace('_', ' ').title()} vs. Iterations", fontsize=14)
+    plt.grid(True, linestyle="--", alpha=0.6)
+    plt.legend()
+    
+    # Use logarithmic scale if plotting learning rate
+    if metric_name == "lr":
+        plt.yscale("log")
+
+    plt.tight_layout()
+    plt.savefig(f"{metric_name}_vs_iterations.png", dpi=300)
+    plt.show()
 
 def parse_args(input_args=None):
     parser = argparse.ArgumentParser(description="Simple example of a training script.")
@@ -218,10 +271,18 @@ def main(args):
     model.llava_model.requires_grad_(False)
 
     # load the dataset
-    data_path = "/bucket/YamadaU/asarkar/CC3M/"
-    dataset = CC3MPatchHFDataset(data_path=data_path)
+    # data_path = "/bucket/YamadaU/asarkar/CC3M/"
+    # dataset = CC3MPatchHFDataset(data_path=data_path)
+    root = "/nfshomes/asarkar6/trinity/small_video_dst/"
+    data_path = {
+        "root": root,
+        "video": os.path.join(root, "videos.txt"),
+        "captions": os.path.join(root, "captions.txt") 
+    }
+    dataset = VideoCaptionDataset(data_path=data_path)
     collate_fn = dataset.collate_fn
-    
+    dataset = ConcatDataset([dataset] * int(10e7))
+
     dataloader = DataLoader(dataset, batch_size=4, shuffle=True, collate_fn=collate_fn)
     
     optimizer = torch.optim.AdamW(
@@ -326,7 +387,8 @@ def main(args):
                     params_to_clip = (
                         model.parameters()
                     )
-                    accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm)
+                    grad_norm_tensor = accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm)
+                    grad_norm = grad_norm_tensor.item() if grad_norm_tensor is not None else 0.0
 
                 optimizer.step()
                 lr_scheduler.step()
@@ -340,7 +402,7 @@ def main(args):
                         # _before_ saving state, check if this save would set us over the `checkpoints_total_limit`
                         if args.checkpoints_total_limit is not None:
                             checkpoints = os.listdir(args.output_dir)
-                            checkpoints = [d for d in checkpoints if d.startswith("connector-checkpoint")]
+                            checkpoints = [d for d in checkpoints if d.startswith("jean-checkpoint")]
                             checkpoints = sorted(checkpoints, key=lambda x: int(x.split("-")[-1]))
 
                             # before we save the new checkpoint, we need to have at _most_ `checkpoints_total_limit - 1` checkpoints
@@ -365,6 +427,19 @@ def main(args):
             progress_bar.set_postfix(**logs)
             accelerator.log(logs, step=global_step)
 
+            if accelerator.is_main_process and global_step % 2 != 0:
+                new_logs ={
+                    "step": global_step,
+                    "loss": float(loss.detach().item()),
+                    "lr": float(lr_scheduler.get_last_lr()[0]),
+                    "grad_norm": float(grad_norm),
+                }
+
+                json_file = os.path.join(args.output_dir, "training_logs.json")
+                mode = "w" if global_step == 1 else "a"
+                with open(json_file, mode=mode, encoding="utf-8") as f:
+                    f.write(json.dumps(new_logs) + "\n")
+
             if global_step >= args.max_train_steps:
                 break
     
@@ -373,3 +448,7 @@ def main(args):
 if __name__ == "__main__":
     args = parse_args()
     main(args)
+
+    plot_json_metric(os.path.join(args.output_dir, "training_logs.json"), metric_name="loss")
+    plot_json_metric(os.path.join(args.output_dir, "training_logs.json"), metric_name="grad_norm")
+    plot_json_metric(os.path.join(args.output_dir, "training_logs.json"), metric_name="lr")
