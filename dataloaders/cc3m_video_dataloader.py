@@ -82,6 +82,18 @@ class CC3MPatchHFDataset(VideoContrastiveDataset):
         video_sequence = np.stack([main_np] + patches, axis=0)
         return video_sequence
 
+    @staticmethod
+    def __choose_one(num):
+        caps_list = [
+            "Caption this image.",
+            "Provide a brief caption describing this video.",
+            "Write a clear, concise caption for the given video.",
+            "Give this video a suitable caption.",
+            "Summarize the visual content of this video in one sentence.",
+            "Generate a standard descriptive caption for this image."
+        ] 
+        return caps_list[num]
+
     def __getitem__(self, index: int):
         try:
             target_image = self.data[index]["image"]
