@@ -1,8 +1,10 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.distributed as dist
+import torch.distributed.nn.functional as dist_nn
 from torch.utils.data import Dataset, DataLoader, ConcatDataset
-from accelerate import Accelerator
+from accelerate import Accelerator, DataLoaderConfiguration
 from accelerate.logging import get_logger
 from accelerate.utils import DistributedDataParallelKwargs
 
@@ -81,8 +83,14 @@ class JointEmbeddingAlignmentNetwork(nn.Module):
         )
         self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
         
-        # Learnable temperature for standard InfoNCE scaling
-        self.temperature = nn.Parameter(torch.ones([]) * 0.07)
+        # Initialize projections safely
+        self.apply(self._init_weights)
+
+    def _init_weights(self, module):
+        if isinstance(module, nn.Linear):
+            nn.init.trunc_normal_(module.weight, std=0.02)
+            if module.bias is not None:
+                nn.init.constant_(module.bias, 0)
 
     def forward(self, vjepa_inputs, llava_inputs):
         with torch.no_grad():
@@ -93,52 +101,76 @@ class JointEmbeddingAlignmentNetwork(nn.Module):
                     output_hidden_states=True,
                     return_dict=True
                 )
-            llava_feats = llava_outputs.hidden_states[-1].float()
+            llava_feats = llava_outputs.hidden_states[-1]
 
             # jepa outputs
-            v_jepa_feats = self.vjepa_model(**vjepa_inputs).last_hidden_state
+            if vjepa_inputs is not None:
+                v_jepa_feats = self.vjepa_model(**vjepa_inputs).last_hidden_state
+            else:
+                v_jepa_feats = None
 
         projected_llava = self.llava_projector(llava_feats)
         
-        # Concatenate tokens sequence-wise: [CLS] + Video + Language
-        combined_tokens = torch.cat([v_jepa_feats, projected_llava], dim=1)
+        # Concatenate tokens sequence-wise
+        combined_tokens = torch.cat([v_jepa_feats, projected_llava], dim=1) if v_jepa_feats is not None else projected_llava
         
         # Pass through attention layers
         transformed_tokens = self.transformer_encoder(combined_tokens)
 
-        fused_representations = self.embedding_projection(transformed_tokens[:, -1, :])
+        # STABILITY FIX: Use index 0 (or mean pooling) rather than -1 to avoid padding artifacts
+        fused_representations = self.embedding_projection(transformed_tokens[:, 0, :])
         
-        # Extract the processed CLS representation [B, 1024]
         return fused_representations
 
-    def compute_infonce_loss(self, cls_representations, temp=0.07):
-        # cls_representations shape: [2*B, D]
-        total_samples = cls_representations.size(0)
-        batch_size = total_samples // 2
+    @staticmethod
+    def gather_embeddings_with_grad(tensor: torch.Tensor) -> torch.Tensor:
+        if not dist.is_available() or not dist.is_initialized() or dist.get_world_size() == 1:
+            return tensor
 
-        # Split into View 1 (positives) and View 2 (negatives/augmented views)
-        z1 = cls_representations[:batch_size]  # [B, D]
-        z2 = cls_representations[batch_size:]  # [B, D]
+        gathered_tensors = dist_nn.all_gather(tensor)
+        return torch.cat(gathered_tensors, dim=0)
 
-        # Normalize embeddings along feature dimension
-        z1_norm = F.normalize(z1, p=2, dim=-1)
-        z2_norm = F.normalize(z2, p=2, dim=-1)
+    def compute_infonce_loss(self, query_embeds, target_embeds, temp=0.07, max_logit=50.0):
+        # 1. Cast to FP32 immediately for numerical stability
+        query_32 = query_embeds.float()
+        target_32 = target_embeds.float()
 
-        # Cross-similarity matrix: [B, B]
-        # Entry (i, j) is the similarity between z1[i] and z2[j]
-        similarity_matrix = torch.matmul(z1_norm, z2_norm.T) / temp
+        # 2. L2 Normalization in local rank
+        q_norm_local = F.normalize(query_32, p=2, dim=-1)
+        t_norm_local = F.normalize(target_32, p=2, dim=-1)
 
-        device = cls_representations.device
-        labels = torch.arange(batch_size, device=device)
+        # 3. Gather across distributed GPUs
+        q_norm = self.gather_embeddings_with_grad(q_norm_local)
+        t_norm = self.gather_embeddings_with_grad(t_norm_local)
 
-        # Symmetric InfoNCE Loss (CLIP-style)
-        # loss_z1_to_z2: Predict z2[i] given z1[i] across all z2 in batch
-        loss_z1_to_z2 = F.cross_entropy(similarity_matrix, labels)
+        # 4. Compute scaled similarity matrix
+        similarity_matrix = torch.matmul(q_norm, t_norm.T) / temp
+
+        # 5. Logit clamping to prevent exponential explosion in Softmax
+        similarity_matrix = torch.clamp(similarity_matrix, min=-max_logit, max=max_logit)
+
+        device = query_embeds.device
         
-        # loss_z2_to_z1: Predict z1[i] given z2[i] across all z1 in batch
-        loss_z2_to_z1 = F.cross_entropy(similarity_matrix.T, labels)
-        
-        total_loss = (loss_z1_to_z2 + loss_z2_to_z1) / 2.0
+        # STABILITY FIX: Correct label indexing across distributed ranks
+        if dist.is_available() and dist.is_initialized() and dist.get_world_size() > 1:
+            rank = dist.get_rank()
+            batch_size = query_embeds.size(0)
+            start_idx = rank * batch_size
+            end_idx = start_idx + batch_size
+            labels = torch.arange(start_idx, end_idx, device=device)
+            
+            # Extract local rows for cross-entropy to conserve memory & keep loss localized
+            local_sim_matrix = similarity_matrix[start_idx:end_idx]
+            
+            loss_q2t = F.cross_entropy(local_sim_matrix, labels)
+            loss_t2q = F.cross_entropy(similarity_matrix.T[start_idx:end_idx], labels)
+        else:
+            batch_size = query_embeds.size(0)
+            labels = torch.arange(batch_size, device=device)
+            loss_q2t = F.cross_entropy(similarity_matrix, labels)
+            loss_t2q = F.cross_entropy(similarity_matrix.T, labels)
+
+        total_loss = (loss_q2t + loss_t2q) / 2.0
         return total_loss
 
 def plot_json_metric(json_path="training_logs.json", metric_name="loss", smooth_window=20):
@@ -236,11 +268,11 @@ def parse_args(input_args=None):
     return args
 
 def main(args):
-    ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
+    dataloader_config = DataLoaderConfiguration(even_batches=True)
     accelerator = Accelerator(
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         mixed_precision=args.mixed_precision,
-        kwargs_handlers=[ddp_kwargs]
+        dataloader_config = dataloader_config
     )
     
     logging.basicConfig(
@@ -274,16 +306,14 @@ def main(args):
     # data_path = "/bucket/YamadaU/asarkar/CC3M/"
     # dataset = CC3MPatchHFDataset(data_path=data_path)
     root = "/nfshomes/asarkar6/trinity/small_video_dst/"
-    data_path = {
-        "root": root,
-        "video": os.path.join(root, "videos.txt"),
-        "captions": os.path.join(root, "captions.txt") 
-    }
+    data_path = {"root": root, "video": os.path.join(root, "videos.txt"), "captions": os.path.join(root, "captions.txt")}
     dataset = VideoCaptionDataset(data_path=data_path)
+
     collate_fn = dataset.collate_fn
+
     dataset = ConcatDataset([dataset] * int(10e7))
 
-    dataloader = DataLoader(dataset, batch_size=4, shuffle=True, collate_fn=collate_fn)
+    dataloader = DataLoader(dataset, batch_size=4, shuffle=True, collate_fn=collate_fn, drop_last=True)
     
     optimizer = torch.optim.AdamW(
         filter(lambda p: p.requires_grad, model.parameters()), 
@@ -314,6 +344,8 @@ def main(args):
         latest_dir = sorted(dirs, key=lambda x: int(str(x).split("-")[-1].split(".")[0]))[-1]
         return str(latest_dir)
 
+    initial_global_step = 0
+
     if args.resume_from_checkpoint:
         logger.info(f"Loading checkpoint from {args.resume_from_checkpoint}")
         latest_checkpoint = get_latest_checkpoint(args.resume_from_checkpoint)
@@ -329,6 +361,8 @@ def main(args):
                 state_dict = checkpoint
 
             missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False)
+
+            initial_global_step = int(latest_checkpoint.split("-")[-1].split(".")[0])
         else:
             accelerator.print("No checkpoint found. Starting training from scratch.")
 
@@ -345,10 +379,8 @@ def main(args):
     logger.info(f"  Total train batch size (w. parallel, distributed & accumulation) = {total_batch_size}")
     logger.info(f"  Gradient Accumulation steps = {args.gradient_accumulation_steps}")
     logger.info(f"  Total optimization steps = {args.max_train_steps}")
-    global_step = 0
+    global_step = initial_global_step
     first_epoch = 0
-
-    initial_global_step = 0
 
     progress_bar = tqdm(
         range(0, args.max_train_steps),
@@ -361,26 +393,35 @@ def main(args):
     for epoch in range(first_epoch, args.num_train_epochs):
         for step, batch in enumerate(dataloader):
             with accelerator.accumulate(model):
-                optimizer.zero_grad()
-
                 # get the entities from batch
-                videos = batch["video_pos"] + batch["video_neg"]
-                prompts = batch["prompts"] + [""]*len(batch["video_neg"])
+                videos_query = batch["video_pos"] 
+                prompts_query = batch["prompts"]
+
+                prompts_target = batch["prompts_neg"]
 
                 # get inputs from v_jepa
-                vjepa_inputs = vjepa_processor(videos, return_tensors="pt").to(accelerator.device)
+                vjepa_inputs = vjepa_processor(videos_query, return_tensors="pt").to(accelerator.device)
 
-                # get inputs from llava-ov
+                # get inputs from llava-ov for query
                 formatted_prompts = []
-                for text_prompt in prompts:
+                for text_prompt in prompts_query:
+                    conversation = [{"role": "user", "content": [{"type": "text", "text": text_prompt}]}]
+                    prompt_formatted = llava_processor.apply_chat_template(conversation, add_generation_prompt=True)
+                    formatted_prompts.append(prompt_formatted)
+                llava_inputs = llava_processor(text=formatted_prompts, padding=True, return_tensors="pt").to(accelerator.device)
+
+                # get inputs from llava-ov for target
+                formatted_prompts = []
+                for text_prompt in prompts_target:
                     conversation = [{"role": "user", "content": [{"type": "text", "text": text_prompt}]}]
                     prompt_formatted = llava_processor.apply_chat_template(conversation, add_generation_prompt=True)
                     formatted_prompts.append(prompt_formatted)
                 llava_inputs = llava_processor(text=formatted_prompts, padding=True, return_tensors="pt").to(accelerator.device)
                 
+                query_embeds = model(vjepa_inputs, llava_inputs)
+                target_embeds = model(None, llava_inputs)
 
-                cls_representations = model(vjepa_inputs, llava_inputs)
-                loss = model.module.compute_infonce_loss(cls_representations)
+                loss = model.module.compute_infonce_loss(query_embeds, target_embeds)
 
                 accelerator.backward(loss)
                 if accelerator.sync_gradients:
@@ -390,8 +431,12 @@ def main(args):
                     grad_norm_tensor = accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm)
                     grad_norm = grad_norm_tensor.item() if grad_norm_tensor is not None else 0.0
 
+                    if grad_norm > 100:
+                        optimizer.zero_grad(set_to_none=True)
+
                 optimizer.step()
                 lr_scheduler.step()
+                optimizer.zero_grad(set_to_none=True)
 
             if accelerator.sync_gradients:
                 progress_bar.update(1)
@@ -418,10 +463,10 @@ def main(args):
                                 for removing_checkpoint in removing_checkpoints:
                                     removing_checkpoint = os.path.join(args.output_dir, removing_checkpoint)
                                     shutil.rmtree(removing_checkpoint)
-                        
-                        unwrapped_model = accelerator.unwrap_model(model)
-                        torch.save(unwrapped_model.state_dict(), os.path.join(args.output_dir, f"jean-checkpoint-{global_step}.pt"))
-                        logger.info("Training cycle complete. Core weights successfully serialized.")
+
+                            unwrapped_model = accelerator.unwrap_model(model)
+                            torch.save(unwrapped_model.state_dict(), os.path.join(args.output_dir, f"jean-checkpoint-{global_step}.pt"))
+                            logger.info("Training cycle complete. Core weights successfully serialized.")
 
             logs = {"loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
             progress_bar.set_postfix(**logs)

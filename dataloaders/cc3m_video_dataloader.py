@@ -98,22 +98,17 @@ class CC3MPatchHFDataset(VideoContrastiveDataset):
         # Build 10-frame patch video sequence: Shape [10, 224, 224, 3]
         video_pos = self.create_patch_sequence(target_image)
 
-        # Create video_neg by randomly shuffling frame order along temporal dim
-        perm = list(range(len(video_pos)))
-        random.shuffle(perm)
-        video_neg = video_pos[perm]
-
         return {
             "video_pos": video_pos,  # Shape: [10, 224, 224, 3]
-            "video_neg": video_neg,  # Shape: [10, 224, 224, 3] (shuffled sequence)
-            "prompts": caption
+            "prompts_neg": caption,  # Shape: [10, 224, 224, 3] (shuffled sequence)
+            "prompts": self.__choose_one(random.randint(0, 5))
         }
 
-if __name__ == "__main__":
-    DATA_DIR = ""
-    dataset = CC3MPatchHFDataset(data_path = os.path.join(DATA_DIR, ""))
-    dataloader = DataLoader(dataset, batch_size=4, shuffle=False, collate_fn=dataset.collate_fn, num_workers=4)
+# if __name__ == "__main__":
+#     DATA_DIR = ""
+#     dataset = CC3MPatchHFDataset(data_path = DATA_DIR)
+#     dataloader = DataLoader(dataset, batch_size=4, shuffle=False, collate_fn=dataset.collate_fn, num_workers=4)
     
-    for i, batch in enumerate(dataloader):
-        pdb.set_trace()
-        break
+#     for i, batch in enumerate(dataloader):
+#         pdb.set_trace()
+#         break

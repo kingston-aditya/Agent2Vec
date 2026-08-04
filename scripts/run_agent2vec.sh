@@ -10,7 +10,7 @@ accelerate launch /nfshomes/asarkar6/aditya/Agent2Vec/training/train_agent_sft.p
     --mixed_precision="bf16" \
     --lr_scheduler="cosine" \
     --lr_warmup_steps=5000 \
-    --max_train_steps=100 \
+    --max_train_steps=1000 \
     --checkpointing_steps=1000 \
     --resume_from_checkpoint=$OUTPUT_DIR \
     --cache_dir=$CACHE_DIR

@@ -3,6 +3,7 @@ from torch.utils.data import Dataset, DataLoader
 import numpy as np
 from datasets import load_dataset
 from decord import VideoReader, cpu
+import random
 
 class VideoContrastiveDataset(Dataset):
     def __init__(self, data_path):
@@ -44,18 +45,30 @@ class VideoContrastiveDataset(Dataset):
         indices = np.linspace(start_idx, total_frames - 1 - offset, num_frames, dtype=int)
         return video_tensor[indices]
 
+    @staticmethod
+    def __choose_one(num):
+        caps_list = [
+            "Caption this image.",
+            "Provide a brief caption describing this video.",
+            "Write a clear, concise caption for the given video.",
+            "Give this video a suitable caption.",
+            "Summarize the visual content of this video in one sentence.",
+            "Generate a standard descriptive caption for this image."
+        ] 
+        return caps_list[num]
+
     def __getitem__(self, idx):
         item = self.data[idx]
 
-        caption = item["caption"]
+        caption = self.__choose_one(random.randint(0, 5))
+        neg_prompt = item["caption"]
         video_tensor = self.load_video(item["video"])
         
         video_view1 = self._sample_frames(video_tensor, num_frames=16, offset=0)
-        video_view2 = self._sample_frames(video_tensor, num_frames=16, offset=8)
         
         return {
             "video_pos": video_view1,  # Shape: [16, 3, 224, 224]
-            "video_neg": video_view2,  # Shape: [16, 3, 224, 224]
+            "prompts_neg": neg_prompt,  # Shape: [16, 3, 224, 224]
             "prompts": caption
         }
 
@@ -64,5 +77,5 @@ class VideoContrastiveDataset(Dataset):
         return {
             "video_pos": [x["video_pos"] for x in batch],
             "prompts": [x["prompts"] for x in batch],
-            "video_neg": [x["video_neg"] for x in batch]
+            "prompts_neg": [x["prompts_neg"] for x in batch]
         }
