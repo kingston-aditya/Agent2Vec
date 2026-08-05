@@ -314,7 +314,7 @@ def main(args):
 
     # dataset = ConcatDataset([dataset] * int(10e7))
 
-    dataloader = DataLoader(dataset, batch_size=4, shuffle=True, collate_fn=collate_fn, drop_last=True)
+    dataloader = DataLoader(dataset, batch_size=args.train_batch_size, shuffle=True, collate_fn=collate_fn, drop_last=True)
     
     optimizer = torch.optim.AdamW(
         filter(lambda p: p.requires_grad, model.parameters()),
