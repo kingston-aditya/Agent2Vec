@@ -9,8 +9,8 @@ accelerate launch /work/YamadaU/asarkar/Agent2Vec/training/train_agent_sft.py \
     --max_grad_norm=1.0 \
     --mixed_precision="bf16" \
     --lr_scheduler="cosine" \
-    --lr_warmup_steps=5000 \
-    --max_train_steps=10000 \
+    --lr_warmup_steps=500 \
+    --max_train_steps=5000 \
     --checkpointing_steps=1000 \
     --resume_from_checkpoint=$OUTPUT_DIR \
     --cache_dir=$CACHE_DIR

@@ -333,17 +333,17 @@ def main(args):
     model.llava_model.requires_grad_(False)
 
     # load the dataset
-    # data_path = "/bucket/YamadaU/asarkar/CC3M/"
-    # dataset = CC3MPatchHFDataset(data_path=data_path)
-    root = "/nfshomes/asarkar6/trinity/small_video_dst/"
-    data_path = {"root": root, "video": os.path.join(root, "videos.txt"), "captions": os.path.join(root, "captions.txt")}
-    dataset = VideoCaptionDataset(data_path=data_path)
+    data_path = "/bucket/YamadaU/asarkar/CC3M/"
+    dataset = CC3MPatchHFDataset(data_path=data_path)
+    #root = "/nfshomes/asarkar6/trinity/small_video_dst/"
+    #data_path = {"root": root, "video": os.path.join(root, "videos.txt"), "captions": os.path.join(root, "captions.txt")}
+    #dataset = VideoCaptionDataset(data_path=data_path)
 
     collate_fn = dataset.collate_fn
 
-    dataset = ConcatDataset([dataset] * int(10e7))
+    #dataset = ConcatDataset([dataset] * int(10e7))
 
-    dataloader = DataLoader(dataset, batch_size=4, shuffle=True, collate_fn=collate_fn, drop_last=True)
+    dataloader = DataLoader(dataset, batch_size=args.train_batch_size, shuffle=True, collate_fn=collate_fn, drop_last=True)
     
     optimizer = torch.optim.AdamW(
         filter(lambda p: p.requires_grad, model.parameters()), 
