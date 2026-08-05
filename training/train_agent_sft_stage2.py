@@ -341,7 +341,13 @@ def main(args):
     def get_latest_checkpoint(checkpoint_dir):
         dirs = [d for d in Path(checkpoint_dir).glob("jean2-checkpoint-*")]
         if not dirs:
-            return None
+            # go to stage 1 checkpoints
+            dirs = [d for d in Path(checkpoint_dir).glob("jean-checkpoint-*")]
+            if not dirs:
+                return None
+            else:
+                latest_dir = sorted(dirs, key=lambda x: int(str(x).split("-")[-1].split(".")[0]))[-1]
+                return str(latest_dir)
         # Sort by step number (assuming folders named like 'checkpoint-1000')
         latest_dir = sorted(dirs, key=lambda x: int(str(x).split("-")[-1].split(".")[0]))[-1]
         return str(latest_dir)
