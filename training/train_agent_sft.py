@@ -118,19 +118,22 @@ class JointEmbeddingAlignmentNetwork(nn.Module):
         combined_tokens = torch.cat([cls, combined_tokens], dim=1)
 
         # get attention mask
-        image_mask = torch.zeros(
-            v_jepa_feats.shape[0],
-            v_jepa_feats.shape[1],
-            dtype=torch.bool,
-            device=v_jepa_feats.device
-        )
-
         text_mask = ~llava_inputs.attention_mask.bool()
 
-        padding_mask = torch.cat(
-            [image_mask, text_mask],
-            dim=1
-        )
+        if v_jepa_feats is None:
+            padding_mask = torch.tensor(text_mask)
+        else:
+            image_mask = torch.zeros(
+                v_jepa_feats.shape[0],
+                v_jepa_feats.shape[1],
+                dtype=torch.bool,
+                device=v_jepa_feats.device
+            )
+            
+            padding_mask = torch.cat(
+                [image_mask, text_mask],
+                dim=1
+            )
 
         cls_mask = torch.zeros(
             padding_mask.size(0),
