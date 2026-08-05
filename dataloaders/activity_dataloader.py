@@ -6,6 +6,13 @@ import numpy as np
 from datasets import Dataset as HFDataset
 from torch.utils.data import Dataset, DataLoader, ConcatDataset
 from decord import VideoReader, cpu
+import random
+
+import sys
+root = os.getcwd()
+while root != os.path.dirname(root) and not os.path.isdir(os.path.join(root, '.git')): root = os.path.dirname(root)
+sys.path.insert(1, root)
+
 from dataloaders.base_dataloader import VideoContrastiveDataset
 
 import pdb
@@ -109,6 +116,18 @@ class ActivityNetCaptionsTarDataset(VideoContrastiveDataset):
             
         return bytes(data)
 
+    @staticmethod
+    def __choose_one(num):
+        caps_list = [
+            "Caption this image.",
+            "Provide a brief caption describing this video.",
+            "Write a clear, concise caption for the given video.",
+            "Give this video a suitable caption.",
+            "Summarize the visual content of this video in one sentence.",
+            "Generate a standard descriptive caption for this image."
+        ] 
+        return caps_list[num]
+
     def __getitem__(self, idx: int):
         item = self.data[idx]
         filename = item["video_filename"]
@@ -130,16 +149,15 @@ class ActivityNetCaptionsTarDataset(VideoContrastiveDataset):
         video_tensor = vr.get_batch(indices).asnumpy()
 
         video_view1 = self._sample_frames(video_tensor, num_frames=16, offset=0)
-        video_view2 = self._sample_frames(video_tensor, num_frames=16, offset=8)
 
         return {
             "video_pos": video_view1,
-            "video_neg": video_view2,
-            "prompts": item["caption"]
+            "prompts_neg": item["caption"],
+            "prompts": self.__choose_one(random.randint(0, 5))
         }
 
 if __name__ == "__main__":
-    DATA_DIR = ""
+    DATA_DIR = "/work/YamadaU/asarkar/"
     dataset = ActivityNetCaptionsTarDataset(data_path = os.path.join(DATA_DIR, ), tar_parts_dir=DATA_DIR)
     dataloader = DataLoader(dataset, batch_size=4, shuffle=False, collate_fn=dataset.collate_fn, num_workers=4)
     
