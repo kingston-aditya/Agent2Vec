@@ -60,11 +60,8 @@ class JointEmbeddingAlignmentNetwork(nn.Module):
         self.vjepa_model = vjepa_model
         self.llava_model = llava_model
 
-        self.embedding_projection = nn.Sequential(
-            nn.Linear(v_jepa_dim, v_jepa_dim),
-            nn.GELU(),
-            nn.Linear(v_jepa_dim, 768)  
-        )
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, v_jepa_dim))
+        nn.init.trunc_normal_(self.cls_token, std=0.02)
         
         # 2-Layer MLP Projection for LLaVA-OV (896 -> 1024)
         self.llava_projector = nn.Sequential(
@@ -113,12 +110,45 @@ class JointEmbeddingAlignmentNetwork(nn.Module):
         
         # Concatenate tokens sequence-wise
         combined_tokens = torch.cat([v_jepa_feats, projected_llava], dim=1) if v_jepa_feats is not None else projected_llava
+
+        # generate one cls token
+        batch_size = combined_tokens.size(0)
+
+        cls = self.cls_token.expand(batch_size, -1, -1)
+        combined_tokens = torch.cat([cls, combined_tokens], dim=1)
+
+        # get attention mask
+        image_mask = torch.zeros(
+            v_jepa_feats.shape[0],
+            v_jepa_feats.shape[1],
+            dtype=torch.bool,
+            device=v_jepa_feats.device
+        )
+
+        text_mask = ~llava_inputs.attention_mask.bool()
+
+        padding_mask = torch.cat(
+            [image_mask, text_mask],
+            dim=1
+        )
+
+        cls_mask = torch.zeros(
+            padding_mask.size(0),
+            1,
+            dtype=torch.bool,
+            device=padding_mask.device
+        )
+
+        padding_mask = torch.cat(
+            [cls_mask, padding_mask],
+            dim=1
+        )
         
         # Pass through attention layers
-        transformed_tokens = self.transformer_encoder(combined_tokens)
+        transformed_tokens = self.transformer_encoder(combined_tokens, src_key_padding_mask=padding_mask)
 
         # STABILITY FIX: Use index 0 (or mean pooling) rather than -1 to avoid padding artifacts
-        fused_representations = self.embedding_projection(transformed_tokens[:, 0, :])
+        fused_representations = transformed_tokens[:, 0, :]
         
         return fused_representations
 
