@@ -84,16 +84,21 @@ class ActivityNetCaptionsTarDataset(VideoContrastiveDataset):
             raw_data = json.load(f)
 
         records = []
-        for video_id, item in raw_data.items():
-            sentences = item.get("sentences", [])
-            full_caption = " ".join(sentences) if isinstance(sentences, list) else str(sentences)
+        for item in raw_data:
+            full_caption = item.get("caption", [])
+            video_id = item.get("video_id", [])
             records.append({
                 "video_id": video_id,
                 "video_filename": f"{video_id}.mp4",
                 "caption": full_caption
             })
 
-        return HFDataset.from_list(records)
+        cleaned_records = []
+        for k in range(len(records)):
+            if records[k]['video_filename'] in list(self.tar_index.keys()):
+                cleaned_records.append(records[k])
+
+        return HFDataset.from_list(cleaned_records)
 
     def _read_bytes_at_offset(self, global_offset: int, size: int) -> bytes:
         """Direct seek and read from specific .part files."""
@@ -132,14 +137,21 @@ class ActivityNetCaptionsTarDataset(VideoContrastiveDataset):
         item = self.data[idx]
         filename = item["video_filename"]
 
-        if filename not in self.tar_index:
-            raise FileNotFoundError(f"Video {filename} not in TAR index.")
+        if filename not in list(self.tar_index.keys()):
+            print(f"Video {filename} not in TAR index.")
+            new_idx = random.randint(0, len(self.data)-1)
+            self.__getitem__(new_idx)
 
-        meta = self.tar_index[filename]
-        video_bytes = self._read_bytes_at_offset(meta["offset"], meta["size"])
+        try:
+            meta = self.tar_index[filename]
+            video_bytes = self._read_bytes_at_offset(meta["offset"], meta["size"])
 
-        buf = io.BytesIO(video_bytes)
-        vr = VideoReader(buf, ctx=cpu(0), width=224, height=224)
+            buf = io.BytesIO(video_bytes)
+            vr = VideoReader(buf, ctx=cpu(0), width=224, height=224)
+        except Exception as e:
+            print(f"Error in loading video: {e}")
+            new_idx = random.randint(0, len(self.data)-1)
+            self.__getitem__(new_idx)
         
         total_frames = len(vr)
         if total_frames <= 0:
@@ -157,9 +169,9 @@ class ActivityNetCaptionsTarDataset(VideoContrastiveDataset):
         }
 
 if __name__ == "__main__":
-    DATA_DIR = "/work/YamadaU/asarkar/"
-    dataset = ActivityNetCaptionsTarDataset(data_path = os.path.join(DATA_DIR, ), tar_parts_dir=DATA_DIR)
-    dataloader = DataLoader(dataset, batch_size=4, shuffle=False, collate_fn=dataset.collate_fn, num_workers=4)
+    DATA_DIR = "/bucket/YamadaU/asarkar/Activity_captions/"
+    dataset = ActivityNetCaptionsTarDataset(data_path = os.path.join(DATA_DIR, "activitynet_captions_train.json"), tar_parts_dir=DATA_DIR)
+    dataloader = DataLoader(dataset, batch_size=16, shuffle=False, collate_fn=dataset.collate_fn, num_workers=4)
     
     for i, batch in enumerate(dataloader):
         pdb.set_trace()

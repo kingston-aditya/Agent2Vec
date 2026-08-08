@@ -18,14 +18,14 @@ class VideoContrastiveDataset(Dataset):
         return len(self.data)
 
     @staticmethod
-    def load_video(video_path):
+    def load_video(video_path, num_frames=32):
         vr = VideoReader(video_path, ctx=cpu(0), width=224, height=224)
         total_frames = len(vr)
         
         if total_frames <= 0:
             raise ValueError("Video file is empty or corrupted.")
             
-        indices = np.linspace(0, total_frames - 1, num=32, dtype=int).tolist()
+        indices = np.linspace(0, total_frames - 1, num=num_frames, dtype=int).tolist()
         decord_frames = vr.get_batch(indices).asnumpy()
         
         return decord_frames

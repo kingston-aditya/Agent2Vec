@@ -35,6 +35,7 @@ sys.path.insert(1, root)
 
 from dataloaders.test_dataloader import VideoCaptionDataset
 from dataloaders.activity_dataloader import ActivityNetCaptionsTarDataset
+from dataloaders.think_kinetics_dataloader import KineticsStreamDataset
 
 import json
 import pandas as pd
@@ -51,7 +52,6 @@ class ForkedPdb(pdb_original.Pdb):
             pdb_original.Pdb.interaction(self, *args, **kwargs)
         finally:
             sys.stdin = _stdin
-
 
 class JointEmbeddingAlignmentNetwork(nn.Module):
     def __init__(self, vjepa_model, llava_model, v_jepa_dim=1024, llava_dim=896, num_layers=4, nhead=8, dim_feedforward=2048):
@@ -118,19 +118,22 @@ class JointEmbeddingAlignmentNetwork(nn.Module):
         combined_tokens = torch.cat([cls, combined_tokens], dim=1)
 
         # get attention mask
-        image_mask = torch.zeros(
-            v_jepa_feats.shape[0],
-            v_jepa_feats.shape[1],
-            dtype=torch.bool,
-            device=v_jepa_feats.device
-        )
-
         text_mask = ~llava_inputs.attention_mask.bool()
 
-        padding_mask = torch.cat(
-            [image_mask, text_mask],
-            dim=1
-        )
+        if v_jepa_feats is None:
+            padding_mask = text_mask
+        else:
+            image_mask = torch.zeros(
+                v_jepa_feats.shape[0],
+                v_jepa_feats.shape[1],
+                dtype=torch.bool,
+                device=v_jepa_feats.device
+            )
+            
+            padding_mask = torch.cat(
+                [image_mask, text_mask],
+                dim=1
+            )
 
         cls_mask = torch.zeros(
             padding_mask.size(0),
@@ -333,22 +336,25 @@ def main(args):
     model.llava_model.requires_grad_(False)
 
     # load the dataset
-    data_path = "/bucket/YamadaU/asarkar/CC3M/"
-    tar_parts_dir = "/bucket/YamadaU/asarkar/"
-    dataset = ActivityNetCaptionsTarDataset(data_path=data_path, tar_parts_dir=tar_parts_dir)
+    # data_path = "/bucket/YamadaU/asarkar/Activity_captions/activitynet_captions_train.json"
+    # tar_parts_dir = "/bucket/YamadaU/asarkar/Activity_captions/"
+    # dataset = ActivityNetCaptionsTarDataset(data_path=data_path, tar_parts_dir=tar_parts_dir)
+    
     # root = "/nfshomes/asarkar6/trinity/small_video_dst/"
     # data_path = {"root": root, "video": os.path.join(root, "videos.txt"), "captions": os.path.join(root, "captions.txt")}
     # dataset = VideoCaptionDataset(data_path=data_path)
+    json_path = "/work/YamadaU/asarkar/agent2vec_outputs/thinking_texts_kinetics.json"
+    video_dir = "/bucket/YamadaU/Datasets/k400/train/"
 
+    dataset = KineticsStreamDataset(json_path, video_dir)
     collate_fn = dataset.collate_fn
-
     # dataset = ConcatDataset([dataset] * int(10e7))
 
-    dataloader = DataLoader(dataset, batch_size=args.train_batch_size, shuffle=True, collate_fn=collate_fn, drop_last=True)
+    dataloader = DataLoader(dataset, batch_size=args.train_batch_size, collate_fn=collate_fn, num_workers=4)
     
     optimizer = torch.optim.AdamW(
         filter(lambda p: p.requires_grad, model.parameters()),
-        lr=args.learning_rate/(args.gradient_accumulation_steps*accelerator.num_processes*args.train_batch_size), 
+        lr=args.learning_rate, 
         betas=(args.adam_beta1, args.adam_beta2),
         weight_decay=args.adam_weight_decay,
         eps=args.adam_epsilon,
@@ -486,7 +492,7 @@ def main(args):
                         if args.checkpoints_total_limit is not None:
                             checkpoints = os.listdir(args.output_dir)
                             checkpoints = [d for d in checkpoints if d.startswith("jean2-checkpoint")]
-                            checkpoints = sorted(checkpoints, key=lambda x: int(x.split("-")[-1]))
+                            checkpoints = sorted(checkpoints, key=lambda x: int(x.split("-")[-1].split(".")[0]))
 
                             # before we save the new checkpoint, we need to have at _most_ `checkpoints_total_limit - 1` checkpoints
                             if len(checkpoints) >= args.checkpoints_total_limit:

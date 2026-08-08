@@ -121,7 +121,7 @@ class JointEmbeddingAlignmentNetwork(nn.Module):
         text_mask = ~llava_inputs.attention_mask.bool()
 
         if v_jepa_feats is None:
-            padding_mask = torch.tensor(text_mask)
+            padding_mask = text_mask
         else:
             image_mask = torch.zeros(
                 v_jepa_feats.shape[0],
@@ -350,6 +350,7 @@ def main(args):
     
     optimizer = torch.optim.AdamW(
         filter(lambda p: p.requires_grad, model.parameters()), 
+        lr = args.learning_rate,
         betas=(args.adam_beta1, args.adam_beta2),
         weight_decay=args.adam_weight_decay,
         eps=args.adam_epsilon,
@@ -365,8 +366,8 @@ def main(args):
     lr_scheduler = get_scheduler(
         args.lr_scheduler,
         optimizer=optimizer,
-        num_warmup_steps=args.lr_warmup_steps * accelerator.num_processes,
-        num_training_steps=args.max_train_steps * accelerator.num_processes,
+        num_warmup_steps=args.lr_warmup_steps,
+        num_training_steps=args.max_train_steps,
     )
 
     def get_latest_checkpoint(checkpoint_dir):
@@ -481,7 +482,7 @@ def main(args):
                         if args.checkpoints_total_limit is not None:
                             checkpoints = os.listdir(args.output_dir)
                             checkpoints = [d for d in checkpoints if d.startswith("jean-checkpoint")]
-                            checkpoints = sorted(checkpoints, key=lambda x: int(x.split("-")[-1]))
+                            checkpoints = sorted(checkpoints, key=lambda x: int(x.split("-")[-1].split(".")[0]))
 
                             # before we save the new checkpoint, we need to have at _most_ `checkpoints_total_limit - 1` checkpoints
                             if len(checkpoints) >= args.checkpoints_total_limit:
